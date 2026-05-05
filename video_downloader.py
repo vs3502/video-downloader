@@ -11,7 +11,25 @@ Optional: ffmpeg (for merging high-quality video+audio)
 import subprocess
 import sys
 import os
-import re
+
+
+# ─────────────────────────────────────────────
+#  DETECT ENVIRONMENT
+# ─────────────────────────────────────────────
+
+def is_termux():
+    return os.path.exists("/data/data/com.termux")
+
+
+def get_default_dir(platform_name):
+    """Return the best save path depending on environment."""
+    if is_termux():
+        if os.path.exists("/sdcard"):
+            return f"/sdcard/Download/VideoDownloader/{platform_name}"
+        else:
+            return os.path.join(os.path.expanduser("~"), "downloads", platform_name)
+    else:
+        return os.path.join(os.path.expanduser("~"), "Downloads", "VideoDownloader", platform_name)
 
 
 # ─────────────────────────────────────────────
@@ -22,7 +40,7 @@ PLATFORMS = {
     "1": {
         "name": "YouTube",
         "icon": "▶️ ",
-        "color": "\033[91m",   # red
+        "color": "\033[91m",
         "domains": ["youtube.com", "youtu.be"],
         "supports_quality": True,
         "supports_audio": True,
@@ -30,7 +48,7 @@ PLATFORMS = {
     "2": {
         "name": "X (Twitter)",
         "icon": "🐦",
-        "color": "\033[97m",   # white
+        "color": "\033[97m",
         "domains": ["twitter.com", "x.com"],
         "supports_quality": False,
         "supports_audio": False,
@@ -38,7 +56,7 @@ PLATFORMS = {
     "3": {
         "name": "TikTok",
         "icon": "🎵",
-        "color": "\033[96m",   # cyan
+        "color": "\033[96m",
         "domains": ["tiktok.com", "vm.tiktok.com"],
         "supports_quality": False,
         "supports_audio": False,
@@ -46,14 +64,14 @@ PLATFORMS = {
     "4": {
         "name": "Reddit",
         "icon": "🤖",
-        "color": "\033[93m",   # yellow/orange
+        "color": "\033[93m",
         "domains": ["reddit.com", "v.redd.it", "redd.it"],
         "supports_quality": False,
         "supports_audio": False,
     },
 }
 
-# ANSI color codes
+# ANSI colors
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
 DIM    = "\033[2m"
@@ -61,25 +79,22 @@ GREEN  = "\033[92m"
 CYAN   = "\033[96m"
 RED    = "\033[91m"
 YELLOW = "\033[93m"
-WHITE  = "\033[97m"
 
 
 # ─────────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────────
 
-def clear_line():
-    print("\r" + " " * 80 + "\r", end="", flush=True)
-
-
 def banner():
+    env_label = f"{GREEN}📱 Termux (Android){RESET}" if is_termux() else f"{CYAN}💻 PC{RESET}"
     print(f"""
 {CYAN}{BOLD}
   ╔══════════════════════════════════════════════╗
   ║       MULTI-PLATFORM VIDEO DOWNLOADER        ║
   ║     YouTube  •  X  •  TikTok  •  Reddit      ║
   ╚══════════════════════════════════════════════╝
-{RESET}""")
+{RESET}  Running on: {env_label}
+""")
 
 
 def install_ytdlp():
@@ -95,8 +110,16 @@ def install_ytdlp():
         print(f"{GREEN}✅ yt-dlp installed!\n{RESET}")
 
 
+def check_storage_permission():
+    """Warn if /sdcard is not accessible on Termux."""
+    if is_termux() and not os.path.exists("/sdcard/Download"):
+        print(f"{YELLOW}⚠️  Storage permission not granted!{RESET}")
+        print(f"  Run {CYAN}termux-setup-storage{RESET} and allow permission.")
+        print(f"  Then restart this script.\n")
+        sys.exit(1)
+
+
 def detect_platform(url):
-    """Auto-detect platform from URL."""
     url_lower = url.lower()
     for key, info in PLATFORMS.items():
         for domain in info["domains"]:
@@ -110,7 +133,7 @@ def progress_hook(d):
         percent = d.get("_percent_str", "??%").strip()
         speed   = d.get("_speed_str",   "??").strip()
         eta     = d.get("_eta_str",     "??").strip()
-        bar_len = 30
+        bar_len = 28
         try:
             pct_val = float(percent.replace("%", ""))
             filled  = int(bar_len * pct_val / 100)
@@ -138,13 +161,12 @@ def get_info(url):
 
 
 def list_qualities(info):
-    """Return sorted list of (label, height) tuples."""
-    seen   = {}
+    seen = {}
     for f in info.get("formats", []):
         h = f.get("height")
         if h and f.get("vcodec", "none") != "none":
             seen[h] = f"{h}p"
-    return sorted(seen.items(), reverse=True)   # [(1080, '1080p'), ...]
+    return sorted(seen.items(), reverse=True)
 
 
 # ─────────────────────────────────────────────
@@ -153,11 +175,18 @@ def list_qualities(info):
 
 def build_ydl_opts(platform_key, quality, audio_only, output_dir):
     os.makedirs(output_dir, exist_ok=True)
-    base_out = os.path.join(output_dir, "%(title)s.%(ext)s")
+    base_out = os.path.join(output_dir, "%(title).80s.%(ext)s")
 
-    # --- Audio only (YouTube) ---
+    common = {
+        "progress_hooks": [progress_hook],
+        "quiet": True,
+        "no_warnings": True,
+        "windowsfilenames": True,  # Strips special chars from filenames
+    }
+
     if audio_only:
         return {
+            **common,
             "format": "bestaudio/best",
             "outtmpl": base_out,
             "postprocessors": [{
@@ -165,68 +194,25 @@ def build_ydl_opts(platform_key, quality, audio_only, output_dir):
                 "preferredcodec": "mp3",
                 "preferredquality": "192",
             }],
-            "progress_hooks": [progress_hook],
-            "quiet": True,
-            "no_warnings": True,
         }
 
-    # --- YouTube with quality ---
     if platform_key == "1" and quality:
-        if quality == "best":
-            fmt = "bestvideo+bestaudio/best"
-        else:
-            h = quality.replace("p", "")
-            fmt = f"bestvideo[height<={h}]+bestaudio/best[height<={h}]"
-        return {
-            "format": fmt,
-            "outtmpl": base_out,
-            "merge_output_format": "mp4",
-            "progress_hooks": [progress_hook],
-            "quiet": True,
-            "no_warnings": True,
-        }
+        h = quality.replace("p", "")
+        fmt = "bestvideo+bestaudio/best" if quality == "best" else \
+              f"bestvideo[height<={h}]+bestaudio/best[height<={h}]"
+        return {**common, "format": fmt, "outtmpl": base_out, "merge_output_format": "mp4"}
 
-    # --- X (Twitter) ---
     if platform_key == "2":
-        return {
-            "format": "best[ext=mp4]/best",
-            "outtmpl": base_out,
-            "progress_hooks": [progress_hook],
-            "quiet": True,
-            "no_warnings": True,
-        }
+        return {**common, "format": "best[ext=mp4]/best", "outtmpl": base_out}
 
-    # --- TikTok ---
     if platform_key == "3":
-        return {
-            "format": "best",
-            "outtmpl": base_out,
-            "progress_hooks": [progress_hook],
-            # Remove TikTok watermark when possible
-            "postprocessor_args": [],
-            "quiet": True,
-            "no_warnings": True,
-        }
+        return {**common, "format": "best", "outtmpl": base_out}
 
-    # --- Reddit ---
     if platform_key == "4":
-        return {
-            "format": "bestvideo+bestaudio/best",
-            "outtmpl": base_out,
-            "merge_output_format": "mp4",
-            "progress_hooks": [progress_hook],
-            "quiet": True,
-            "no_warnings": True,
-        }
+        return {**common, "format": "bestvideo+bestaudio/best", "outtmpl": base_out,
+                "merge_output_format": "mp4"}
 
-    # Fallback
-    return {
-        "format": "best",
-        "outtmpl": base_out,
-        "progress_hooks": [progress_hook],
-        "quiet": True,
-        "no_warnings": True,
-    }
+    return {**common, "format": "best", "outtmpl": base_out}
 
 
 def download(url, platform_key, quality=None, audio_only=False, output_dir=None):
@@ -237,7 +223,7 @@ def download(url, platform_key, quality=None, audio_only=False, output_dir=None)
 
 
 # ─────────────────────────────────────────────
-#  UI FLOWS
+#  UI
 # ─────────────────────────────────────────────
 
 def choose_platform():
@@ -246,12 +232,11 @@ def choose_platform():
         color = p["color"]
         print(f"    {color}{BOLD}[{key}]{RESET}  {p['icon']}  {color}{p['name']}{RESET}")
     print()
-
     while True:
         choice = input("  Enter number (1-4): ").strip()
         if choice in PLATFORMS:
             return choice
-        print(f"  {RED}Invalid choice. Please enter 1, 2, 3, or 4.{RESET}")
+        print(f"  {RED}Invalid. Enter 1, 2, 3, or 4.{RESET}")
 
 
 def choose_download_type():
@@ -268,9 +253,12 @@ def choose_download_type():
 
 def choose_quality(qualities):
     print(f"\n{BOLD}  Available qualities:{RESET}\n")
-    tags = {1080: f"{RED}🔥 Full HD{RESET}", 720: f"{YELLOW}⭐ HD{RESET}",
-            480: f"{GREEN}👍 SD{RESET}", 360: f"{DIM}360p{RESET}"}
-
+    tags = {
+        1080: f"{RED}🔥 Full HD{RESET}",
+        720:  f"{YELLOW}⭐ HD{RESET}",
+        480:  f"{GREEN}👍 SD{RESET}",
+        360:  f"{DIM}Low{RESET}",
+    }
     for i, (h, label) in enumerate(qualities, 1):
         tag = ""
         for threshold, t in tags.items():
@@ -278,11 +266,9 @@ def choose_quality(qualities):
                 tag = f"  {t}"
                 break
         print(f"    {GREEN}[{i}]{RESET}  {label}{tag}")
-
     n = len(qualities)
     print(f"    {GREEN}[{n+1}]{RESET}  ⚡ Best available (auto)")
     print()
-
     while True:
         try:
             c = int(input("  Choose quality: ").strip())
@@ -296,7 +282,7 @@ def choose_quality(qualities):
 
 
 def choose_output_dir(platform_name):
-    default = os.path.join(os.path.expanduser("~"), "Downloads", "VideoDownloader", platform_name)
+    default = get_default_dir(platform_name)
     print(f"\n{BOLD}  Save location:{RESET}")
     print(f"  {DIM}Default: {default}{RESET}")
     d = input("  Press Enter to use default, or type a path: ").strip()
@@ -308,7 +294,6 @@ def show_video_info(info, platform):
     uploader = info.get("uploader") or info.get("channel") or info.get("creator") or "Unknown"
     duration = info.get("duration", 0) or 0
     mins, secs = divmod(int(duration), 60)
-
     color = PLATFORMS[platform]["color"]
     print(f"\n  {color}{'─'*48}{RESET}")
     print(f"  {BOLD}📹 {title}{RESET}")
@@ -324,28 +309,29 @@ def main():
     banner()
     install_ytdlp()
 
-    # ── Step 1: Platform ──
+    if is_termux():
+        check_storage_permission()
+
+    # Step 1: Platform
     platform_key = choose_platform()
     platform     = PLATFORMS[platform_key]
     color        = platform["color"]
-
     print(f"\n  {color}{BOLD}✔ {platform['name']} selected{RESET}\n")
     print(f"  {'─'*48}")
 
-    # ── Step 2: URL ──
+    # Step 2: URL
     url = input(f"\n  🔗 Paste {platform['name']} URL: ").strip()
     if not url:
         print(f"  {RED}❌ No URL provided. Exiting.{RESET}")
         sys.exit(1)
 
-    # Auto-detect mismatch warning
     detected = detect_platform(url)
     if detected and detected != platform_key:
         wrong = PLATFORMS[detected]["name"]
         print(f"  {YELLOW}⚠️  This looks like a {wrong} link. Continuing anyway...{RESET}")
 
-    # ── Step 3: Fetch info ──
-    print(f"\n  {DIM}🔍 Fetching info...{RESET}")
+    # Step 3: Fetch info
+    print(f"\n  {DIM}🔍 Fetching video info...{RESET}")
     try:
         info = get_info(url)
     except Exception as e:
@@ -354,12 +340,12 @@ def main():
         print(f"\n  {YELLOW}💡 Tips:{RESET}")
         print(f"  • Make sure the URL is correct and the video is public")
         print(f"  • For X/Twitter, login may be required for some videos")
-        print(f"  • Try updating yt-dlp: {CYAN}pip install -U yt-dlp{RESET}")
+        print(f"  • Try: {CYAN}pip install -U yt-dlp{RESET}")
         sys.exit(1)
 
     show_video_info(info, platform_key)
 
-    # ── Step 4: Options ──
+    # Step 4: Download type & quality
     audio_only = False
     quality    = None
 
@@ -371,21 +357,20 @@ def main():
         if qualities:
             quality = choose_quality(qualities)
         else:
-            print(f"  {YELLOW}⚠️  No quality data found — using best available.{RESET}")
+            print(f"  {YELLOW}⚠️  No quality data — using best available.{RESET}")
             quality = "best"
     elif not audio_only:
         print(f"  {DIM}ℹ️  Downloading best available quality for {platform['name']}.{RESET}")
 
-    # ── Step 5: Output dir ──
+    # Step 5: Output directory
     output_dir = choose_output_dir(platform["name"])
 
-    # ── Step 6: Download ──
+    # Step 6: Download
     print(f"\n  {color}{'═'*48}{RESET}")
     if audio_only:
         print(f"  {BOLD}🎵 Downloading audio as MP3...{RESET}")
     else:
-        q_label = quality or "best"
-        print(f"  {BOLD}🎬 Downloading {platform['name']} video ({q_label})...{RESET}")
+        print(f"  {BOLD}🎬 Downloading {platform['name']} video ({quality or 'best'})...{RESET}")
     print(f"  {color}{'═'*48}{RESET}\n")
 
     try:
@@ -394,24 +379,27 @@ def main():
         err = str(e)
         print(f"\n  {RED}❌ Download failed:{RESET}")
         print(f"  {DIM}{err}{RESET}")
-
         print(f"\n  {YELLOW}💡 Troubleshooting:{RESET}")
         if "ffmpeg" in err.lower():
-            print(f"  • Install ffmpeg → https://ffmpeg.org/download.html")
+            print(f"  • Install ffmpeg: {CYAN}pkg install ffmpeg{RESET} (Termux)")
         elif "private" in err.lower() or "login" in err.lower():
-            print(f"  • This video may be private or require login")
+            print(f"  • This video is private or requires login")
         elif "copyright" in err.lower():
-            print(f"  • This video may be copyright-restricted in your region")
+            print(f"  • This video is copyright-restricted in your region")
+        elif "permitted" in err.lower() or "permission" in err.lower():
+            print(f"  • Run: {CYAN}termux-setup-storage{RESET} and allow storage permission")
         else:
-            print(f"  • Try updating yt-dlp: {CYAN}pip install -U yt-dlp{RESET}")
-            print(f"  • Make sure the URL is correct and the video is public")
+            print(f"  • Try: {CYAN}pip install -U yt-dlp{RESET}")
         sys.exit(1)
 
-    # ── Done ──
+    # Done
     print(f"\n  {GREEN}{BOLD}🎉 Download complete!{RESET}")
     print(f"  {DIM}📁 Saved to: {output_dir}{RESET}")
-    print(f"\n  {'─'*48}")
 
+    if is_termux():
+        print(f"\n  {CYAN}📂 Open Files app → Downloads → VideoDownloader → {platform['name']}{RESET}")
+
+    print(f"\n  {'─'*48}")
     again = input(f"\n  {BOLD}Download another? (y/n):{RESET} ").strip().lower()
     if again == "y":
         print()
